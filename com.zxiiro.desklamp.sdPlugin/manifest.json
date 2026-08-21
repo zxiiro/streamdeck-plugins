@@ -1,0 +1,47 @@
+{
+  "Actions": [
+    {
+      "Icon": "icons/action",
+      "Name": "Desk Lamp",
+      "States": [
+        {
+          "Image": "icons/lamp-off",
+          "Name": "Off",
+          "Title": "Desk Lamp",
+          "TitleAlignment": "bottom",
+          "FontSize": "11",
+          "TitleColor": "#ffffff"
+        },
+        {
+          "Image": "icons/lamp-on",
+          "Name": "On",
+          "Title": "Desk Lamp",
+          "TitleAlignment": "bottom",
+          "FontSize": "11",
+          "TitleColor": "#ffd400"
+        }
+      ],
+      "SupportedInMultiActions": true,
+      "Tooltip": "Toggle the Desk Lamp and show whether it is on or off",
+      "UUID": "com.zxiiro.desklamp.toggle"
+    }
+  ],
+  "SDKVersion": 2,
+  "Author": "zxiiro",
+  "CodePath": "plugin.sh",
+  "Description": "Toggle Desk Lamp with a yellow lamp when on and a white outline when off.",
+  "Name": "Desk Lamp",
+  "Icon": "icons/plugin",
+  "Category": "Home",
+  "CategoryIcon": "icons/plugin",
+  "Version": "1.0.0",
+  "OS": [
+    {
+      "Platform": "mac",
+      "MinimumVersion": "12.0"
+    }
+  ],
+  "Software": {
+    "MinimumVersion": "6.4"
+  }
+}
