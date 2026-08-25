@@ -21,6 +21,7 @@
           "TitleColor": "#ffd400"
         }
       ],
+      "DisableAutomaticStates": true,
       "SupportedInMultiActions": true,
       "Tooltip": "Toggle the Desk Lamp and show whether it is on or off",
       "UUID": "com.zxiiro.desklamp.toggle"
@@ -34,7 +35,7 @@
   "Icon": "icons/plugin",
   "Category": "Home",
   "CategoryIcon": "icons/plugin",
-  "Version": "1.0.0",
+  "Version": "1.0.1",
   "OS": [
     {
       "Platform": "mac",

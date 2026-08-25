@@ -246,14 +246,26 @@ class Plugin:
         for ctx in targets:
             await self.set_state(ctx, is_on)
 
-    async def sync_from_home(self, contexts: list[str] | None = None, retries: tuple[float, ...] = (0, 2, 5, 10)) -> None:
+    async def sync_from_home(
+        self,
+        contexts: list[str] | None = None,
+        retries: tuple[float, ...] = (0, 2, 5, 10),
+        expected: bool | None = None,
+    ) -> None:
+        last_live = None
         for delay in retries:
             if delay:
                 await asyncio.sleep(delay)
             is_on = await asyncio.to_thread(self.read_lamp_state)
             if is_on is None:
                 continue
+            last_live = is_on
+            if expected is not None and is_on != expected:
+                continue
             await self.apply_state(is_on, contexts)
+            return
+        if last_live is not None:
+            await self.apply_state(last_live, contexts)
             return
         fallback = self.fallback_state()
         if fallback is None:
@@ -295,9 +307,16 @@ class Plugin:
             current = self.contexts.get(context)
             if current is None:
                 current = self.fallback_state() or False
-            await self.set_state(context, not current)
+            desired = not current
+            await self.set_state(context, desired)
             await asyncio.to_thread(self.run_toggle)
-            asyncio.create_task(self.sync_from_home(contexts=[context], retries=(1.5, 4)))
+            asyncio.create_task(
+                self.sync_from_home(
+                    contexts=[context],
+                    retries=(2.5, 5, 8),
+                    expected=desired,
+                )
+            )
         elif event == "didReceiveSettings" and context:
             settings = (msg.get("payload") or {}).get("settings") or {}
             if "is_on" in settings and context not in self.contexts:
