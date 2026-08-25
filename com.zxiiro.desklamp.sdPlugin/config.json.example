@@ -1,5 +1,6 @@
 {
   "shortcut": "Toggle Desk Lamp",
+  "get_shortcut": "",
   "ha_url": "",
   "ha_token": "",
   "entity_id": ""

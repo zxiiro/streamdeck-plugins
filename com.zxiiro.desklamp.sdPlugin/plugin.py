@@ -16,12 +16,15 @@ from pathlib import Path
 import websockets
 
 DIR = Path(__file__).resolve().parent
-XDG_CONFIG = Path.home() / ".config" / "streamdeck" / "desklamp.json"
+XDG_DIR = Path.home() / ".config" / "streamdeck"
+XDG_CONFIG = XDG_DIR / "desklamp.json"
+STATE_PATH = XDG_DIR / "desklamp-state.json"
 LOCAL_CONFIG = DIR / "config.json"
 LOG = logging.getLogger("desklamp")
 
 DEFAULTS = {
     "shortcut": "Toggle Desk Lamp",
+    "get_shortcut": "",
     "ha_url": "",
     "ha_token": "",
     "entity_id": "",
@@ -39,6 +42,36 @@ def load_config() -> dict:
         except Exception:
             LOG.exception("config read failed: %s", path)
     return cfg
+
+
+def load_persisted_state() -> bool | None:
+    try:
+        data = json.loads(STATE_PATH.read_text())
+    except FileNotFoundError:
+        return None
+    except Exception:
+        LOG.exception("state read failed")
+        return None
+    if "is_on" not in data:
+        return None
+    return bool(data["is_on"])
+
+
+def save_persisted_state(is_on: bool) -> None:
+    try:
+        XDG_DIR.mkdir(parents=True, exist_ok=True)
+        STATE_PATH.write_text(json.dumps({"is_on": is_on}) + "\n")
+    except Exception:
+        LOG.exception("state write failed")
+
+
+def parse_on_off(text: str) -> bool | None:
+    value = text.strip().lower()
+    if value in {"on", "true", "1", "yes"}:
+        return True
+    if value in {"off", "false", "0", "no"}:
+        return False
+    return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,12 +98,16 @@ class Plugin:
 
     async def set_state(self, context: str, is_on: bool) -> None:
         self.contexts[context] = is_on
+        save_persisted_state(is_on)
         await self.send(
             {
                 "event": "setState",
                 "context": context,
                 "payload": {"state": 1 if is_on else 0},
             }
+        )
+        await self.send(
+            {"event": "setSettings", "context": context, "payload": {"is_on": is_on}}
         )
 
     def ha_enabled(self) -> bool:
@@ -145,19 +182,94 @@ class Plugin:
             start_new_session=True,
         )
 
-    async def refresh_from_ha(self) -> None:
-        is_on = await asyncio.to_thread(self.read_ha_state)
-        if is_on is None:
-            return
-        for ctx in list(self.contexts):
+    def read_shortcut_state(self) -> bool | None:
+        shortcut = (self.cfg.get("get_shortcut") or "").strip()
+        if not shortcut:
+            return None
+        out = Path("/tmp/desklamp-get-state.txt")
+        try:
+            result = subprocess.run(
+                [
+                    "/usr/bin/shortcuts",
+                    "run",
+                    shortcut,
+                    "--output-path",
+                    str(out),
+                    "--output-type",
+                    "public.plain-text",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=12,
+                stdin=subprocess.DEVNULL,
+            )
+        except Exception:
+            LOG.debug("get shortcut failed", exc_info=True)
+            return None
+        chunks = [result.stdout or "", result.stderr or ""]
+        if out.is_file():
+            chunks.append(out.read_text(errors="ignore"))
+        for chunk in chunks:
+            parsed = parse_on_off(chunk)
+            if parsed is not None:
+                return parsed
+        return None
+
+    def read_lamp_state(self) -> bool | None:
+        self.cfg = load_config()
+        for reader in (self.read_ha_state, self.read_shortcut_state):
+            try:
+                value = reader()
+            except Exception:
+                LOG.debug("state reader failed", exc_info=True)
+                continue
+            if value is not None:
+                return value
+        return None
+
+    def fallback_state(self, settings: dict | None = None) -> bool | None:
+        live = None
+        settings = settings or {}
+        if "is_on" in settings:
+            live = bool(settings["is_on"])
+        persisted = load_persisted_state()
+        if persisted is not None:
+            return persisted
+        return live
+
+    def can_poll_live(self) -> bool:
+        self.cfg = load_config()
+        return self.ha_enabled() or bool((self.cfg.get("get_shortcut") or "").strip())
+
+    async def apply_state(self, is_on: bool, contexts: list[str] | None = None) -> None:
+        targets = contexts if contexts is not None else list(self.contexts)
+        for ctx in targets:
             await self.set_state(ctx, is_on)
+
+    async def sync_from_home(self, contexts: list[str] | None = None, retries: tuple[float, ...] = (0, 2, 5, 10)) -> None:
+        for delay in retries:
+            if delay:
+                await asyncio.sleep(delay)
+            is_on = await asyncio.to_thread(self.read_lamp_state)
+            if is_on is None:
+                continue
+            await self.apply_state(is_on, contexts)
+            return
+        fallback = self.fallback_state()
+        if fallback is None:
+            return
+        await self.apply_state(fallback, contexts)
+
+    async def ensure_poll_loop(self) -> None:
+        if self._poll_task is None:
+            self._poll_task = asyncio.create_task(self.poll_loop())
 
     async def poll_loop(self) -> None:
         while True:
             try:
-                await asyncio.sleep(3)
-                if self.ha_enabled() and self.contexts:
-                    await self.refresh_from_ha()
+                await asyncio.sleep(5)
+                if self.contexts and self.can_poll_live():
+                    await self.sync_from_home(retries=(0,))
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -169,38 +281,26 @@ class Plugin:
         if event == "willAppear" and context:
             payload = msg.get("payload") or {}
             settings = payload.get("settings") or {}
-            if "is_on" in settings:
-                is_on = bool(settings["is_on"])
-            else:
-                is_on = False
-                ha = await asyncio.to_thread(self.read_ha_state)
-                if ha is not None:
-                    is_on = ha
-            await self.set_state(context, is_on)
-            if self._poll_task is None:
-                self._poll_task = asyncio.create_task(self.poll_loop())
+            fallback = self.fallback_state(settings)
+            if fallback is not None:
+                await self.set_state(context, fallback)
+            await self.ensure_poll_loop()
+            asyncio.create_task(self.sync_from_home(contexts=[context]))
         elif event == "willDisappear" and context:
             self.contexts.pop(context, None)
+        elif event in {"systemDidWakeUp", "deviceDidConnect"}:
+            await self.ensure_poll_loop()
+            asyncio.create_task(self.sync_from_home())
         elif event == "keyDown" and context:
-            current = self.contexts.get(context, False)
-            # Optimistic flip so the key reacts immediately.
+            current = self.contexts.get(context)
+            if current is None:
+                current = self.fallback_state() or False
             await self.set_state(context, not current)
             await asyncio.to_thread(self.run_toggle)
-            await self.send({"event": "setSettings", "context": context, "payload": {"is_on": not current}})
-
-            async def confirm() -> None:
-                await asyncio.sleep(1.5)
-                ha = await asyncio.to_thread(self.read_ha_state)
-                if ha is not None:
-                    await self.set_state(context, ha)
-                    await self.send(
-                        {"event": "setSettings", "context": context, "payload": {"is_on": ha}}
-                    )
-
-            asyncio.create_task(confirm())
+            asyncio.create_task(self.sync_from_home(contexts=[context], retries=(1.5, 4)))
         elif event == "didReceiveSettings" and context:
             settings = (msg.get("payload") or {}).get("settings") or {}
-            if "is_on" in settings:
+            if "is_on" in settings and context not in self.contexts:
                 await self.set_state(context, bool(settings["is_on"]))
 
     async def run(self) -> None:

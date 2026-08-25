@@ -13,8 +13,9 @@ Stream Deck key and shows a yellow lamp when on, or a white outline
 when off.
 
 Pressing the key runs the Shortcuts shortcut named in local config
-(default: `Toggle Desk Lamp`). Optional Home Assistant polling can keep
-the icon in sync when the lamp is changed elsewhere.
+(default: `Toggle Desk Lamp`). After sleep or USB reconnect, the plugin
+restores the last known icon and retries a live read (Home Assistant, or
+an optional `get_shortcut` that prints `on`/`off`).
 
 ## Install
 
