@@ -7,7 +7,6 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import subprocess
 import urllib.error
 import urllib.request
@@ -29,6 +28,7 @@ DEFAULTS = {
     "ha_token": "",
     "entity_id": "",
 }
+BOOT_RETRIES = (0, 2, 5, 10, 20, 40)
 
 
 def load_config() -> dict:
@@ -67,9 +67,9 @@ def save_persisted_state(is_on: bool) -> None:
 
 def parse_on_off(text: str) -> bool | None:
     value = text.strip().lower()
-    if value in {"on", "true", "1", "yes"}:
+    if value in {"on", "true", "1", "1.0", "yes", "power on"}:
         return True
-    if value in {"off", "false", "0", "no"}:
+    if value in {"off", "false", "0", "0.0", "no", "power off"}:
         return False
     return None
 
@@ -109,6 +109,13 @@ class Plugin:
         await self.send(
             {"event": "setSettings", "context": context, "payload": {"is_on": is_on}}
         )
+
+    async def reassert_state(self, context: str, is_on: bool) -> None:
+        for delay in (0.05, 0.25):
+            await asyncio.sleep(delay)
+            if self.contexts.get(context) != is_on:
+                return
+            await self.set_state(context, is_on)
 
     def ha_enabled(self) -> bool:
         return bool(self.cfg.get("ha_token") and self.cfg.get("ha_url"))
@@ -267,10 +274,7 @@ class Plugin:
         if last_live is not None:
             await self.apply_state(last_live, contexts)
             return
-        fallback = self.fallback_state()
-        if fallback is None:
-            return
-        await self.apply_state(fallback, contexts)
+        # Keep the optimistic or persisted icon if HomeKit/HA never answered.
 
     async def ensure_poll_loop(self) -> None:
         if self._poll_task is None:
@@ -297,12 +301,16 @@ class Plugin:
             if fallback is not None:
                 await self.set_state(context, fallback)
             await self.ensure_poll_loop()
-            asyncio.create_task(self.sync_from_home(contexts=[context]))
+            # Recheck live state: after reboot HomeKit/HA may not be up yet,
+            # and Stream Deck two-state keys often come back inverted.
+            asyncio.create_task(
+                self.sync_from_home(contexts=[context], retries=BOOT_RETRIES)
+            )
         elif event == "willDisappear" and context:
             self.contexts.pop(context, None)
         elif event in {"systemDidWakeUp", "deviceDidConnect"}:
             await self.ensure_poll_loop()
-            asyncio.create_task(self.sync_from_home())
+            asyncio.create_task(self.sync_from_home(retries=BOOT_RETRIES))
         elif event == "keyDown" and context:
             current = self.contexts.get(context)
             if current is None:
@@ -310,6 +318,7 @@ class Plugin:
             desired = not current
             await self.set_state(context, desired)
             await asyncio.to_thread(self.run_toggle)
+            asyncio.create_task(self.reassert_state(context, desired))
             asyncio.create_task(
                 self.sync_from_home(
                     contexts=[context],
@@ -329,6 +338,7 @@ class Plugin:
             await self.send(
                 {"event": self.args.register_event, "uuid": self.args.plugin_uuid}
             )
+            asyncio.create_task(self.sync_from_home(retries=BOOT_RETRIES))
             async for raw in ws:
                 try:
                     msg = json.loads(raw)
